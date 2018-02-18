@@ -11,6 +11,8 @@
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <linux/if_ether.h>
+#include <netinet/ether.h>
+#include <stdlib.h>
 
 int main() {
     int packet_socket;
@@ -21,6 +23,11 @@ int main() {
     //common since most interfaces will have a MAC, IPv4, and IPv6
     //address. You can use the names to match up which IPv4 address goes
     //with which MAC address.
+    u_int8_t macAddress[4][6];
+    struct macAddr {
+        u_int8_t mac[6];
+    };
+
     struct ifaddrs *ifaddr, *tmp;
     if (getifaddrs(&ifaddr) == -1) {
         perror("getifaddrs");
@@ -30,27 +37,10 @@ int main() {
     fd_set sockets; // a set of file descriptors
     FD_ZERO(&sockets);
 
-    // struct ifreq ifr;
-    // int fd;
-    // int rv;                     // return value - error value from df or ioctl call
-
-    // /* determine the local MAC address */
-    // strcpy(ifr.ifr_name, ifname);
-    // fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
-    // if (fd < 0)
-    //     rv = fd;
-    // else {
-    //     rv = ioctl(fd, SIOCGIFHWADDR, &ifr);
-    //     if (rv >= 0)            /* worked okay */
-    //         memcpy(mac, ifr.ifr_hwaddr.sa_data, IFHWADDRLEN);
-    // }
-
-    // return rv;
-
 
     //have the list, loop over the list
     for (tmp = ifaddr; tmp != NULL; tmp = tmp->ifa_next) {
-        //Check if this is a packet address, there will be one per
+        //Check if this is a packet address, there will be one perss
         //interface.  There are IPv4 and IPv6 as well, but we don't care
         //about those for the purpose of enumerating interfaces. We can
         //use the AF_INET addresses in this list for example to get a list
@@ -58,7 +48,18 @@ int main() {
         if (tmp->ifa_addr->sa_family == AF_PACKET) {
             printf("Interface: %s\n", tmp->ifa_name);
             //create a packet socket on interface r?-eth1
+
             if (strncmp(tmp->ifa_name, "lo", 2)) {
+                struct sockaddr_ll * sockaddr = (sockaddr_ll *)(tmp->ifa_addr);
+                struct macAddr macaddr;
+                memcpy(macaddr.mac, sockaddr->sll_addr, 6);
+                printf("Our MAC: %s\n", ether_ntoa((struct ether_addr *) macaddr.mac));
+
+                char interfaceNumber = tmp->ifa_name[strlen(tmp->ifa_name) - 1];
+                memcpy(macAddress[atoi(&interfaceNumber)], macaddr.mac, 6 * sizeof(u_int8_t));
+                printf("Added mac address : %s\n", ether_ntoa((struct ether_addr *) macAddress[atoi(&interfaceNumber)]));
+
+
                 printf("Creating Socket on interface %s\n", tmp->ifa_name);
                 //create a packet socket
                 //AF_PACKET makes it a packet socket
@@ -84,6 +85,7 @@ int main() {
             }
         }
     }
+
     //loop and recieve packets. We are only looking at one interface,
     //for the project you will probably want to look at more (to do so,
     //a good way is to have one socket per interface and use select to
@@ -122,6 +124,22 @@ int main() {
                 } else {
                     // do icmp stuff
                     printf("NOT ARP PACKET!!!\n");
+                    char etherHeader[26];
+                    strncpy(etherHeader, packet, 26);
+
+                    char ipHeader[32];
+                    strncpy(ipHeader, packet + 26, 32);
+
+                    char icmpHeader[8];
+                    strncpy(icmpHeader, packet + (26+32), 8);
+
+
+                    printf("ether source: %s  ether dest:%s\n", etherHeader+8, etherHeader+14);
+                    char swapMacs[6];
+                    memcpy(swapMacs, etherHeader + 8, 6);
+                    memcpy(etherHeader + 8, etherHeader + 14, 6);
+                    memcpy(etherHeader + 14, swapMacs, 6);
+                    printf("ether source: %s  ether dest:%s\n", etherHeader+8, etherHeader+14);
                 }
             }
         }
