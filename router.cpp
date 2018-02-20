@@ -13,6 +13,11 @@
 #include <linux/if_ether.h>
 #include <netinet/ether.h>
 #include <stdlib.h>
+#include <net/ethernet.h>
+#include <netinet/ip.h>
+#include <netinet/ip_icmp.h>
+#include <net/if_arp.h>
+
 
 int main() {
     int packet_socket;
@@ -23,10 +28,13 @@ int main() {
     //common since most interfaces will have a MAC, IPv4, and IPv6
     //address. You can use the names to match up which IPv4 address goes
     //with which MAC address.
-    u_int8_t macAddress[4][6];
-    struct macAddr {
+    // u_int8_t macAddress[4][6];
+
+    struct addressPair {
         u_int8_t mac[6];
+        struct in_addr ip;
     };
+    struct addressPair addresses[4];
 
     struct ifaddrs *ifaddr, *tmp;
     if (getifaddrs(&ifaddr) == -1) {
@@ -51,13 +59,24 @@ int main() {
 
             if (strncmp(tmp->ifa_name, "lo", 2)) {
                 struct sockaddr_ll * sockaddr = (sockaddr_ll *)(tmp->ifa_addr);
-                struct macAddr macaddr;
-                memcpy(macaddr.mac, sockaddr->sll_addr, 6);
-                printf("Our MAC: %s\n", ether_ntoa((struct ether_addr *) macaddr.mac));
-
                 char interfaceNumber = tmp->ifa_name[strlen(tmp->ifa_name) - 1];
-                memcpy(macAddress[atoi(&interfaceNumber)], macaddr.mac, 6 * sizeof(u_int8_t));
-                printf("Added mac address : %s\n", ether_ntoa((struct ether_addr *) macAddress[atoi(&interfaceNumber)]));
+                memcpy(&(addresses[atoi(&interfaceNumber)].mac), sockaddr->sll_addr, 6*sizeof(u_int8_t));
+                // printf("Our MAC: %s\n", ether_ntoa((struct ether_addr *) addr.mac));
+
+                // char interfaceNumber = tmp->ifa_name[strlen(tmp->ifa_name) - 1];
+                // memcpy((addresses + atoi(&interfaceNumber)), &addr, sizeof(struct addressPair));
+                // printf("Added mac address : %s\n", ether_ntoa((struct ether_addr *) addresses[atoi(&interfaceNumber)].mac));
+
+
+                // struct sockaddr_in * sockaddrIP = (sockaddr_in *)(tmp->ifa_addr);
+                // addr.ip.s_addr = sockaddrIP->sin_addr.s_addr;
+                // printf("Our IP: %s\n", inet_ntoa(addr.ip));
+
+                
+                // memcpy((addresses + atoi(&interfaceNumber)), &addr, sizeof(struct addressPair));
+                printf("Our Mac : %s\n", ether_ntoa((struct ether_addr *) addresses[atoi(&interfaceNumber)].mac));
+                // printf("Added ip address : %s\n", inet_ntoa(addr.ip));
+
 
 
                 printf("Creating Socket on interface %s\n", tmp->ifa_name);
@@ -82,6 +101,15 @@ int main() {
                     perror("bind");
                 }
                 FD_SET(packet_socket, &sockets);
+            }
+        } else if (tmp->ifa_addr->sa_family == AF_INET) {
+            printf("AF_INET\n");
+            if (strncmp(tmp->ifa_name, "lo", 2)) {
+                struct sockaddr_in * sockaddrIP = (sockaddr_in *)(tmp->ifa_addr);
+
+                char interfaceNumber = tmp->ifa_name[strlen(tmp->ifa_name) - 1];
+                addresses[atoi(&interfaceNumber)].ip.s_addr = sockaddrIP->sin_addr.s_addr;
+                printf("Our IP: %s\n", inet_ntoa(addresses[atoi(&interfaceNumber)].ip));
             }
         }
     }
@@ -121,25 +149,103 @@ int main() {
                 if (htons(sourceAddr.sll_protocol) == ETH_P_ARP) {
                     // do arp stuff
                     printf("ARP PACKET!!!\n");
+
+                    struct ether_header *ether;
+                    struct ether_arp *arp;
+
+                    ether = (struct ether_header *)packet;
+                    arp = (struct ether_arp *)(packet + sizeof(struct ether_header));
+
+                    int addressIndex = 0;
+                    unsigned long tpa;
+                    memcpy(&tpa, arp->arp_tpa, 4);
+                    struct in_addr tpaStruct;
+                    tpaStruct.s_addr = tpa;
+                    for (int z = 0; z < 4; z++) {
+                        // printf("ar_hln: %d  ar_pln: %d\n", arp->ar_hln, arp->ar_pln);
+                        // printf("s_addr: %s\n", inet_ntoa(addresses[z].ip));
+                        // printf("tpaStruct: %s\n", inet_ntoa(tpaStruct) );
+
+                        char address[50];
+                        strcpy(address, inet_ntoa(addresses[z].ip));
+                        char tpaAddress[50];
+                        strcpy(tpaAddress, inet_ntoa(tpaStruct));
+
+                        if (strcmp(address, tpaAddress) == 0) {
+                            addressIndex = z;
+                            break;
+                        }
+                    }
+                    
+                    // printf("addressIndex: %d\n", addressIndex);
+                    // printf("dst: %s\n", ether_ntoa((struct ether_addr *)ether->ether_dhost));
+                    // printf("src: %s\n", ether_ntoa((struct ether_addr *)ether->ether_shost));
+                    memcpy(ether->ether_dhost, ether->ether_shost, 6*sizeof(u_int8_t));
+                    memcpy(ether->ether_shost, &(addresses[addressIndex].mac), 6*sizeof(u_int8_t));
+                    // printf("dst: %s\n", ether_ntoa((struct ether_addr *)ether->ether_dhost));
+                    // printf("src: %s\n", ether_ntoa((struct ether_addr *)ether->ether_shost));
+                    
+                    struct in_addr spa;
+                    memcpy(&(spa.s_addr), arp->arp_spa, 4);
+                    struct in_addr tpa2;
+                    memcpy(&(tpa2.s_addr), arp->arp_tpa, 4);
+                    printf("BEFORE SWAP\n");
+                    printf("sha: %s\n", ether_ntoa((struct ether_addr *)arp->arp_sha));
+                    printf("spa: %s\n", inet_ntoa(spa));
+                    printf("tha: %s\n", ether_ntoa((struct ether_addr *)arp->arp_tha));
+                    printf("tpa: %s\n", inet_ntoa(tpa2));
+                    
+                    memcpy(arp->arp_tha, arp->arp_sha, 6);
+                    memcpy(arp->arp_sha, &(addresses[addressIndex].mac), 6);
+                    u_char swapSenderIP[4];
+                    memcpy(swapSenderIP, arp->arp_tpa, 4);
+                    memcpy(arp->arp_tpa, arp->arp_spa, 4);
+                    memcpy(arp->arp_spa, swapSenderIP, 4);
+
+                    memcpy(&(spa.s_addr), arp->arp_spa, 4);
+                    memcpy(&(tpa2.s_addr), arp->arp_tpa, 4);
+                    printf("AFTER SWAP\n");
+                    printf("sha: %s\n", ether_ntoa((struct ether_addr *)arp->arp_sha));
+                    printf("spa: %s\n", inet_ntoa(spa));
+                    printf("tha: %s\n", ether_ntoa((struct ether_addr *)arp->arp_tha));
+                    printf("tpa: %s\n", inet_ntoa(tpa2));
+
+
+                    send(i, packet, 1500, NULL);
                 } else {
                     // do icmp stuff
-                    printf("NOT ARP PACKET!!!\n");
-                    char etherHeader[26];
-                    strncpy(etherHeader, packet, 26);
+                    struct ether_header *ether;
+                    struct ip *ipHeader;
+                    struct icmp *icmpHeader;
 
-                    char ipHeader[32];
-                    strncpy(ipHeader, packet + 26, 32);
+                    ether = (struct ether_header *)packet;
+                    ipHeader = (struct ip *)(packet + sizeof(struct ether_header) );
+                    icmpHeader = (struct icmp *)(packet + sizeof(struct ether_header) + sizeof(struct ip) );
 
-                    char icmpHeader[8];
-                    strncpy(icmpHeader, packet + (26+32), 8);
+                    
+                    // printf("%s\n", inet_ntoa((struct in_addr ) ipHeader->ip_dst));
+                    // printf("%d\n", icmpHeader->icmp_type);
+                    // printf("src: %s\n",  ether_ntoa((struct ether_addr *) ether->ether_shost));
+                    // printf("dst: %s\n",ether_ntoa((struct ether_addr *) ether->ether_dhost));
+                    u_int8_t swap[6];
+                    memcpy(swap, ether->ether_dhost, 6*sizeof(u_int8_t));
+                    memcpy(ether->ether_dhost, ether->ether_shost, 6*sizeof(u_int8_t));
+                    memcpy(ether->ether_shost, swap, 6*sizeof(u_int8_t));
+                    // printf("src: %s\n",  ether_ntoa((struct ether_addr *) ether->ether_shost));
+                    // printf("dst: %s\n",ether_ntoa((struct ether_addr *) ether->ether_dhost));
 
+                    // printf("src: %s\n", inet_ntoa(ipHeader->ip_src));
+                    // printf("dst: %s\n", inet_ntoa(ipHeader->ip_dst));
+                    struct in_addr swapIp;
+                    swapIp.s_addr = ipHeader->ip_dst.s_addr;
+                    ipHeader->ip_dst.s_addr = ipHeader->ip_src.s_addr;
+                    ipHeader->ip_src.s_addr = swapIp.s_addr;
+                    // printf("src: %s\n", inet_ntoa(ipHeader->ip_src));
+                    // printf("dst: %s\n", inet_ntoa(ipHeader->ip_dst));
 
-                    printf("ether source: %s  ether dest:%s\n", etherHeader+8, etherHeader+14);
-                    char swapMacs[6];
-                    memcpy(swapMacs, etherHeader + 8, 6);
-                    memcpy(etherHeader + 8, etherHeader + 14, 6);
-                    memcpy(etherHeader + 14, swapMacs, 6);
-                    printf("ether source: %s  ether dest:%s\n", etherHeader+8, etherHeader+14);
+                    icmpHeader->icmp_type = 0;
+
+                    send(i, packet, 1500, NULL);
                 }
             }
         }
