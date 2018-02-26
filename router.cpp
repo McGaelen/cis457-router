@@ -18,6 +18,7 @@
 #include <netinet/ip_icmp.h>
 //#include <net/if_arp.h>
 #include <netinet/ether.h>
+#include <zconf.h>
 
 
 int main() {
@@ -163,9 +164,7 @@ int main() {
 
                 // Get the destination IP and figure out if it's ours --------------------------------------------------
                 // If it's ARP, grab the destIP from the ARP data
-                printf("about to check arp\n");
                 if (htons(sourceAddr.sll_protocol) == ETH_P_ARP) {
-                    printf("arp packet\n");
                     struct ether_arp *arp;
                     arp = (struct ether_arp *)(packet + sizeof(struct ether_header));
 
@@ -213,8 +212,6 @@ int main() {
                 if (isOurIp) {
                     if (htons(sourceAddr.sll_protocol) == ETH_P_ARP) {
                         // do arp stuff
-                        printf("ARP PACKET!!!\n");
-                        
                         struct ether_arp *arp;
                         arp = (struct ether_arp *)(packet + sizeof(struct ether_header));
 
@@ -253,6 +250,8 @@ int main() {
 
                         memcpy(&(spa.s_addr), arp->arp_spa, 4);
                         memcpy(&(tpa2.s_addr), arp->arp_tpa, 4);
+
+                        arp->ea_hdr.ar_op = htons(ARPOP_REPLY);
 
                         send(i, packet, packetSize, 0);
 
@@ -296,12 +295,21 @@ int main() {
                     char line[50];
                     char interface[50];
                     while (fgets(line, 50, f) != NULL) {
-                        if (strncmp(destinationIpStr, line, 6) == 0) {
-                            // we found the matching entry for the destination IP
-                            strncpy(interface, (line + strlen(line)-8), 7);
-                            break;
+                        if (strncmp(line+9, "1", 1) == 0) {
+                            if (strncmp(destinationIpStr, line, 4) == 0) {
+                                // we found the matching entry for the destination IP
+                                strncpy(interface, (line + strlen(line) - 8), 7);
+                                break;
+                            }
+                        } else {
+                            if (strncmp(destinationIpStr, line, 6) == 0) {
+                                // we found the matching entry for the destination IP
+                                strncpy(interface, (line + strlen(line) - 8), 7);
+                                break;
+                            }
                         }
                     }
+//                    printf("interface: %s\n", interface);
                     fclose(f);
 
                     // Generate ARP Request -------------
@@ -322,17 +330,18 @@ int main() {
                     }
 
                     u_int64_t broadcastAddr = 0xffffffffffff;
-                    short arpProtocol = ETHERTYPE_ARP;
+//                    short arpProtocol = ETHERTYPE_ARP;
                     memcpy(newEtherHeader->ether_dhost, &broadcastAddr, 6);
-                    memcpy(&(newEtherHeader->ether_type), &arpProtocol, 2);
+//                    memcpy(&(newEtherHeader->ether_type), &arpProtocol, 2);
+                    newEtherHeader->ether_type = htons(ETHERTYPE_ARP);
 
                     // Constructing ARP Header on ARP Request
                     newArpHeader->ea_hdr.ar_hrd = htons(1);
                     newArpHeader->ea_hdr.ar_pro = htons(0x800);
-                    newArpHeader->ea_hdr.ar_hln = htons(6);
-                    newArpHeader->ea_hdr.ar_pln = htons(4);
+                    newArpHeader->ea_hdr.ar_hln = 6;
+                    newArpHeader->ea_hdr.ar_pln = 4;
                     newArpHeader->ea_hdr.ar_op = htons(ARPOP_REQUEST);
-                    memcpy(newArpHeader->arp_sha, newEtherHeader->ether_shost, 6);
+                    memcpy(newArpHeader->arp_sha, &(addresses[addressIndex].mac), 6);
                     memcpy(newArpHeader->arp_spa, &(addresses[addressIndex].ip.s_addr), 4);
                     u_int64_t zeroes = 0x0;
                     memcpy(newArpHeader->arp_tha, &(zeroes), 6);
@@ -341,8 +350,16 @@ int main() {
                         memcpy(newArpHeader->arp_tpa, &(destinationIp.s_addr), 4);
                     } else {
                         struct in_addr *arpDestination;
-                        inet_aton(line+12, arpDestination);
-                        memcpy(newArpHeader->arp_tpa, &(arpDestination->s_addr), 4);
+                        char arpDestinationStr[50];
+                        strncpy(arpDestinationStr, line+12, 8);
+//                        *(arpDestinationStr+8) = '\0';
+//                        char ipbytes[4];
+//                        sscanf(arpDestinationStr, "%uhh.%uhh.%uhh.%uhh", &ipbytes[3], &ipbytes[2], &ipbytes[1], &ipbytes[0]);
+//                        int ip = ipbytes[0] | ipbytes[1] << 8 | ipbytes[2] << 16 | ipbytes[3] << 24;
+//                        inet_aton(arpDestinationStr, arpDestination);
+                        int ip = inet_addr(arpDestinationStr);
+//                        printf("router address: %d\n", htons(ip));
+                        memcpy(newArpHeader->arp_tpa, &(ip), 4);
                     }
 
                     // Find the correct socket to send the ARP request on
@@ -358,20 +375,23 @@ int main() {
 
                     // send Arp request
                     send(arpSocket, arpRequest, 42, 0);
+//                    sleep(2);
 
                     // Reveive arp response
                     char arpResponse[50];
-                    int arpResponseSize = recv(i, arpResponse, 50, MSG_WAITALL);
+                    int arpResponseSize = recv(arpSocket, arpResponse, 50, 0);
 
                     // Add MAC to original packet
-                    struct ether_arp *arpResponseStruct;
-                    arpResponseStruct = (struct ether_arp *)(arpResponse + sizeof(struct ether_header));
+                    struct ether_header *arpResponseStruct;
+                    arpResponseStruct = (struct ether_header *)(arpResponse);
                     memcpy(ether->ether_shost, addresses[arpSocketIndex].mac, 6);
-                    memcpy(ether->ether_dhost, arpResponseStruct->arp_sha, 6);
-                    printf("orig packet shost: %s\n", ether_ntoa((struct ether_addr *)ether->ether_shost));
-                    printf("orig packet dhost: %s\n", ether_ntoa((struct ether_addr *)ether->ether_dhost));
+                    memcpy(ether->ether_dhost, arpResponseStruct->ether_shost, 6);
+//                    ether->ether_type = htons(ETHERTYPE_ARP);
+//                    printf("orig packet shost: %s\n", ether_ntoa((struct ether_addr *)ether->ether_shost));
+//                    printf("orig packet dhost: %s\n", ether_ntoa((struct ether_addr *)ether->ether_dhost));
 
                     // Forward original packet
+                    printf("Forwarding packet to %s\n", ether_ntoa((struct ether_addr *)ether->ether_dhost));
                     send(arpSocket, packet, packetSize, 0);
                 }
             }
