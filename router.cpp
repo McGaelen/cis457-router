@@ -20,6 +20,19 @@
 #include <netinet/ether.h>
 #include <zconf.h>
 
+u_short computeChecksum(u_short *buf, int count) {
+    register u_long sum = 0;
+
+    while (count--) {
+        sum += *buf++;
+        if (sum & 0xFFFF0000) {
+            sum &= 0xFFFF;
+            sum++;
+        }
+    }
+
+    return ~(sum & 0xFFFF);
+}
 
 int main() {
     int packet_socket;
@@ -161,6 +174,7 @@ int main() {
 
                 struct ether_header *ether;
                 ether = (struct ether_header *)packet;
+                struct ip *ipHeader;
 
                 // Get the destination IP and figure out if it's ours --------------------------------------------------
                 // If it's ARP, grab the destIP from the ARP data
@@ -188,8 +202,14 @@ int main() {
                     }
                 // If it's an IP packet, grab the destIP off the IP header
                 } else if (htons(sourceAddr.sll_protocol) == 0x800) {
-                    struct ip *ipHeader;
+
                     ipHeader = (struct ip *)(packet + sizeof(struct ether_header) );
+
+                    u_short origChecksum = ipHeader->ip_sum;
+                    ipHeader->ip_sum = 0;
+                    if (computeChecksum((u_short *) ipHeader, 10) != origChecksum) {
+                        continue;
+                    }
 
                     destinationIp.s_addr = ipHeader->ip_dst.s_addr;
                     // printf("destIP: %s\n", inet_ntoa(destinationIp))//;
@@ -284,6 +304,11 @@ int main() {
 
                 // If it was not meant for us, then forward the packet -------------------------------------------------
                 } else {
+
+
+                    ipHeader->ip_sum = 0;
+                    ipHeader->ip_sum = computeChecksum((u_short *) ipHeader, 10);
+
                     // Look up IP address in routing table -------------
                     char filename[50];
                     strcpy(filename, ourInterfaceName);
@@ -294,7 +319,8 @@ int main() {
                     strcpy(destinationIpStr, inet_ntoa(destinationIp));
                     char line[50];
                     char interface[50];
-                    while (fgets(line, 50, f) != NULL) {
+                    char *error;
+                    while ((error = fgets(line, 50, f)) != NULL) {
                         if (strncmp(line+9, "1", 1) == 0) {
                             if (strncmp(destinationIpStr, line, 4) == 0) {
                                 // we found the matching entry for the destination IP
@@ -309,8 +335,54 @@ int main() {
                             }
                         }
                     }
+
+                    ipHeader->ip_ttl--;
+                    if (ipHeader->ip_ttl <= 0) {
+                        // TODO: Send error msg
+                        printf("ttl is 0\n");
+                        char icmpTime[28];
+
+                        struct ether_header *icmpTimeEther;
+                        struct ip *icmpTimeIp;
+                        struct icmp *icmpTimeHdr;
+                        icmpTimeEther = (struct ether_header *)icmpTime;
+                        icmpTimeIp = (struct ip *)(icmpTime + sizeof(struct ether_header));
+                        icmpTimeHdr = (struct icmp *)icmpTime + sizeof(struct ether_header) + sizeof(struct ip);
+
+                        memcpy(icmpTimeEther->ether_shost, ether->ether_dhost, 6);
+                        memcpy(icmpTimeEther->ether_dhost, ether->ether_shost, 6);
+                        icmpTimeEther->ether_type = ether->ether_type;
+
+                        memcpy(icmpTimeIp, ipHeader, sizeof(struct ip));
+                        icmpTimeIp->ip_dst.s_addr = ipHeader->ip_src.s_addr;
+                        int addressIndex = 0;
+                        for (int z = 0; z < 4; z++) {
+                            if (strcmp(interface, addresses[z].interfaceName) == 0) {
+                                addressIndex = z;
+                                break;
+                            }
+                        }
+                        icmpTimeIp->ip_src.s_addr = addresses[addressIndex].ip.s_addr;
+                        icmpTimeIp->ip_ttl = 64;
+                        icmpTimeIp->ip_sum = 0;
+                        icmpTimeIp->ip_sum = computeChecksum((u_short *)icmpTimeIp, 10);
+                        icmpTimeIp->ip_p = 1;
+
+                        // change ICMP header, and add 8 bytes of original packet
+
+                        send(i, icmpTime, sizeof(icmpTime), 0);
+
+                        continue;
+                    }
 //                    printf("interface: %s\n", interface);
                     fclose(f);
+                    if (error == NULL) {
+                        printf("Network unreachable\n");
+                        char icmpError[36];
+                        struct ether_header icmpErrorEther;
+                        // TODO: error
+                        continue;
+                    }
 
                     // Generate ARP Request -------------
                     // Constructing ethernet header on ARP Request
@@ -377,9 +449,20 @@ int main() {
                     send(arpSocket, arpRequest, 42, 0);
 //                    sleep(2);
 
+                    struct timeval timeout;
+                    timeout.tv_sec = 1;
+                    timeout.tv_usec = 0;
+                    setsockopt(arpSocket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
                     // Reveive arp response
                     char arpResponse[50];
                     int arpResponseSize = recv(arpSocket, arpResponse, 50, 0);
+                    if (arpResponseSize <= 0) {
+                        //TODO: Destination unreachable
+                    }
+
+                    // change it back to not have timeout
+                    setsockopt(arpSocket, SOL_SOCKET, SO_RCVTIMEO, NULL, 0);
 
                     // Add MAC to original packet
                     struct ether_header *arpResponseStruct;
