@@ -176,6 +176,8 @@ int main() {
                 ether = (struct ether_header *)packet;
                 struct ip *ipHeader;
 
+                u_short originalPacketChecksum = 0;
+
                 // Get the destination IP and figure out if it's ours --------------------------------------------------
                 // If it's ARP, grab the destIP from the ARP data
                 if (htons(sourceAddr.sll_protocol) == ETH_P_ARP) {
@@ -205,9 +207,9 @@ int main() {
 
                     ipHeader = (struct ip *)(packet + sizeof(struct ether_header) );
 
-                    u_short origChecksum = ipHeader->ip_sum;
+                    originalPacketChecksum = ipHeader->ip_sum;
                     ipHeader->ip_sum = 0;
-                    if (computeChecksum((u_short *) ipHeader, 10) != origChecksum) {
+                    if (computeChecksum((u_short *) ipHeader, 10) != originalPacketChecksum) {
                         continue;
                     }
 
@@ -306,9 +308,6 @@ int main() {
                 } else {
 
 
-                    ipHeader->ip_sum = 0;
-                    ipHeader->ip_sum = computeChecksum((u_short *) ipHeader, 10);
-
                     // Look up IP address in routing table -------------
                     char filename[50];
                     strcpy(filename, ourInterfaceName);
@@ -338,16 +337,15 @@ int main() {
 
                     ipHeader->ip_ttl--;
                     if (ipHeader->ip_ttl <= 0) {
-                        // TODO: Send error msg
                         printf("ttl is 0\n");
-                        char icmpTime[28];
+                        char icmpTime[98];
 
                         struct ether_header *icmpTimeEther;
                         struct ip *icmpTimeIp;
                         struct icmp *icmpTimeHdr;
                         icmpTimeEther = (struct ether_header *)icmpTime;
                         icmpTimeIp = (struct ip *)(icmpTime + sizeof(struct ether_header));
-                        icmpTimeHdr = (struct icmp *)icmpTime + sizeof(struct ether_header) + sizeof(struct ip);
+                        icmpTimeHdr = (struct icmp *)(icmpTime + sizeof(struct ether_header) + sizeof(struct ip));
 
                         memcpy(icmpTimeEther->ether_shost, ether->ether_dhost, 6);
                         memcpy(icmpTimeEther->ether_dhost, ether->ether_shost, 6);
@@ -364,11 +362,19 @@ int main() {
                         }
                         icmpTimeIp->ip_src.s_addr = addresses[addressIndex].ip.s_addr;
                         icmpTimeIp->ip_ttl = 64;
+                        icmpTimeIp->ip_p = 1;
                         icmpTimeIp->ip_sum = 0;
                         icmpTimeIp->ip_sum = computeChecksum((u_short *)icmpTimeIp, 10);
-                        icmpTimeIp->ip_p = 1;
 
                         // change ICMP header, and add 8 bytes of original packet
+                        icmpTimeHdr->icmp_type = 11; // 11 = Time Exceeded Msg
+                        icmpTimeHdr->icmp_code = 0; // 0 = TTL reached 0
+                        int zero = 0;
+                        memcpy((icmpTimeHdr + 4), &(zero), 4);
+                        memcpy(&(icmpTimeHdr->icmp_ip), ipHeader, sizeof(struct ip)+8);
+                        icmpTimeHdr->icmp_ip.ip_sum = originalPacketChecksum;
+                        icmpTimeHdr->icmp_cksum = 0;
+                        icmpTimeHdr->icmp_cksum = computeChecksum((u_short *) icmpTimeHdr, 18);
 
                         send(i, icmpTime, sizeof(icmpTime), 0);
 
@@ -378,9 +384,47 @@ int main() {
                     fclose(f);
                     if (error == NULL) {
                         printf("Network unreachable\n");
-                        char icmpError[36];
-                        struct ether_header icmpErrorEther;
-                        // TODO: error
+
+                        char icmpNetwork[98];
+
+                        struct ether_header *icmpNetworkEther;
+                        struct ip *icmpNetworkIp;
+                        struct icmp *icmpNetworkHdr;
+                        icmpNetworkEther = (struct ether_header *)icmpNetwork;
+                        icmpNetworkIp = (struct ip *)(icmpNetwork + sizeof(struct ether_header));
+                        icmpNetworkHdr = (struct icmp *)(icmpNetwork + sizeof(struct ether_header) + sizeof(struct ip));
+
+                        memcpy(icmpNetworkEther->ether_shost, ether->ether_dhost, 6);
+                        memcpy(icmpNetworkEther->ether_dhost, ether->ether_shost, 6);
+                        icmpNetworkEther->ether_type = ether->ether_type;
+
+                        memcpy(icmpNetworkIp, ipHeader, sizeof(struct ip));
+                        icmpNetworkIp->ip_dst.s_addr = ipHeader->ip_src.s_addr;
+                        int addressIndex = 0;
+                        for (int z = 0; z < 4; z++) {
+                            if (strcmp(interface, addresses[z].interfaceName) == 0) {
+                                addressIndex = z;
+                                break;
+                            }
+                        }
+                        icmpNetworkIp->ip_src.s_addr = addresses[addressIndex].ip.s_addr;
+                        icmpNetworkIp->ip_ttl = 64;
+                        icmpNetworkIp->ip_p = 1;
+                        icmpNetworkIp->ip_sum = 0;
+                        icmpNetworkIp->ip_sum = computeChecksum((u_short *)icmpNetworkIp, 10);
+
+                        // change ICMP header, and add 8 bytes of original packet
+                        icmpNetworkHdr->icmp_type = 3; // 3 = Destination unreachable
+                        icmpNetworkHdr->icmp_code = 0; // 0 = network
+                        int zero = 0;
+                        memcpy((icmpNetworkHdr + 4), &(zero), 4);
+                        memcpy(&(icmpNetworkHdr->icmp_ip), ipHeader, sizeof(struct ip)+8);
+                        icmpNetworkHdr->icmp_ip.ip_sum = originalPacketChecksum;
+                        icmpNetworkHdr->icmp_cksum = 0;
+                        icmpNetworkHdr->icmp_cksum = computeChecksum((u_short *) icmpNetworkHdr, 18);
+
+                        send(i, icmpNetwork, sizeof(icmpNetwork), 0);
+
                         continue;
                     }
 
@@ -458,7 +502,46 @@ int main() {
                     char arpResponse[50];
                     int arpResponseSize = recv(arpSocket, arpResponse, 50, 0);
                     if (arpResponseSize <= 0) {
-                        //TODO: Destination unreachable
+                        printf("Host unreachable\n");
+                        char icmpHost[98];
+
+                        struct ether_header *icmpHostEther;
+                        struct ip *icmpHostIp;
+                        struct icmp *icmpHostHdr;
+                        icmpHostEther = (struct ether_header *)icmpHost;
+                        icmpHostIp = (struct ip *)(icmpHost + sizeof(struct ether_header));
+                        icmpHostHdr = (struct icmp *)(icmpHost + sizeof(struct ether_header) + sizeof(struct ip));
+
+                        memcpy(icmpHostEther->ether_shost, ether->ether_dhost, 6);
+                        memcpy(icmpHostEther->ether_dhost, ether->ether_shost, 6);
+                        icmpHostEther->ether_type = ether->ether_type;
+
+                        memcpy(icmpHostIp, ipHeader, sizeof(struct ip));
+                        icmpHostIp->ip_dst.s_addr = ipHeader->ip_src.s_addr;
+                        int addressIndex = 0;
+                        for (int z = 0; z < 4; z++) {
+                            if (strcmp(interface, addresses[z].interfaceName) == 0) {
+                                addressIndex = z;
+                                break;
+                            }
+                        }
+                        icmpHostIp->ip_src.s_addr = addresses[addressIndex].ip.s_addr;
+                        icmpHostIp->ip_ttl = 64;
+                        icmpHostIp->ip_p = 1;
+                        icmpHostIp->ip_sum = 0;
+                        icmpHostIp->ip_sum = computeChecksum((u_short *)icmpHostIp, 10);
+
+                        // change ICMP header, and add 8 bytes of original packet
+                        icmpHostHdr->icmp_type = 3; // 3 = Destination unreachable
+                        icmpHostHdr->icmp_code = 1; // 1 = host
+                        int zero = 0;
+                        memcpy((icmpHostHdr + 4), &(zero), 4);
+                        memcpy(&(icmpHostHdr->icmp_ip), ipHeader, sizeof(struct ip)+8);
+                        icmpHostHdr->icmp_ip.ip_sum = originalPacketChecksum;
+                        icmpHostHdr->icmp_cksum = 0;
+                        icmpHostHdr->icmp_cksum = computeChecksum((u_short *) icmpHostHdr, 18);
+
+                        send(i, icmpHost, sizeof(icmpHost), 0);
                     }
 
                     // change it back to not have timeout
@@ -473,6 +556,8 @@ int main() {
 //                    printf("orig packet shost: %s\n", ether_ntoa((struct ether_addr *)ether->ether_shost));
 //                    printf("orig packet dhost: %s\n", ether_ntoa((struct ether_addr *)ether->ether_dhost));
 
+                    ipHeader->ip_sum = 0;
+                    ipHeader->ip_sum = computeChecksum((u_short *) ipHeader, 10);
                     // Forward original packet
                     printf("Forwarding packet to %s\n", ether_ntoa((struct ether_addr *)ether->ether_dhost));
                     send(arpSocket, packet, packetSize, 0);
